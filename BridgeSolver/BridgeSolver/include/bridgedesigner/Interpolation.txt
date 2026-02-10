@@ -1,0 +1,484 @@
+/**
+     * Interpolator used for animation purposes. Could also be used to decide failure case
+     * at other than panel point resolution.  We are interpolating either between two load cases
+     * corresponding to load location at given joint indices (including a pseudo-joint that puts
+     * the load entirely right of the bridge) or we are interpolating between two different
+     * interpolations with the load at the same place.  The latter supports the failure animation.
+     */
+    public class Interpolation {
+        private final TerrainModel terrain;
+        private final Affine.Vector [] displacement = initialDisp();
+        private final double forceRatio [] = new double [DesignConditions.maxMemberCount];
+        private final Affine.Point ptLoad = new Affine.Point();
+        private final Affine.Vector zeroDisp = new Affine.Vector(0.0, 0.0);
+        private final Affine.Point ptRightApproach = new Affine.Point(-100.0, 0.0);
+        private final Affine.Vector loadRotation = new Affine.Vector();
+        private double xLoadParameter;
+        private int nFailures = 0;
+        private final double [] failureStatus = new double [DesignConditions.maxMemberCount];
+        
+        /**
+         * Make a new interpolation with roadway elevations taken from the given terrain.
+         * 
+         * @param terrain terrain describing roadway elevation
+         */
+        public Interpolation(TerrainModel terrain) {
+            this.terrain = terrain;
+        }
+
+        /**
+         * Return the base getLength of a failed member with given index.
+         * 
+         * @param i index of member
+         * @return base getLength of failed member
+         */
+        public double getMemberStatus(int i) {
+            return failureStatus[i];
+        }
+        
+        /**
+         * Create an initial array of displacement vectors.
+         * 
+         * @return array of zero displacement vectors
+         */
+        private Affine.Vector [] initialDisp() {
+            Affine.Vector [] v = new Affine.Vector [DesignConditions.maxJointCount];
+            for (int i = 0; i < v.length; i++) {
+                v[i] = new Affine.Vector();
+            }
+            return v;
+        }
+
+        /**
+         * Return true at least one of the members is failing.
+         * 
+         * @return member failure indication
+         */
+        public boolean isFailure() {
+            return nFailures > 0;
+        }
+        
+        /**
+         * Return true iff the member with given index has failed.
+         * 
+         * @param i index of member
+         * @return true iff member with index i has failed
+         */
+        public boolean isFailure(int i) {
+            return failureStatus[i] >= 0;
+        }
+        
+        /**
+         * Return the load location.
+         * 
+         * @return location of the front axle in world coordintes.
+         */
+        public Affine.Point getPtLoad() {
+            return ptLoad;
+        }
+
+        /**
+         * Return a rotation-about-z matrix to put the load at the right angle from horizontal.
+         * 
+         * @return load rotation matrix.
+         */
+        public float [] getLoadRotationMatrix() {
+            return Utility.rotateAboutZ(loadRotation.x, loadRotation.y);
+        }
+        
+        /**
+         * Return a unit direction vector signifying the load rotation with respect to the positive x-axis.
+         * 
+         * @return load rotation direction vector ( [1,0] is no rotation at all ).
+         */
+        public Affine.Vector getLoadRotation() {
+            return loadRotation;
+        }
+
+        /**
+         * Get a 2d vector describing interpolated displacement of the joint with index i.
+         * 
+         * @param i index of joint
+         * @return 2d vector displacement
+         */
+        public Affine.Vector getDisplacement(int i) {
+            return displacement[i];
+        }
+  
+        /**
+         * Return an array that quantities indicating which members are failed in the
+         * interpolation.  Test for equality with the public constant NOT_FAILED.
+         * 
+         * @return boolean array true at indices of failed members, else false
+         */
+        public double [] getFailureStatus() {
+            return failureStatus;
+        }
+        
+        /**
+         * Get the interpolated scalar force ratio value for the member with index i.  The ratio is
+         * -1 for 100% compression capacity and +1 for 100% tension capacity. 
+         * 
+         * @param i index of member
+         * @return force ratio
+         */
+        public double getForceRatio(int i) {
+            return forceRatio[i];
+        }
+
+        /**
+         * Helper routine to determine how far the load must rotate from
+         * horizontal to have both contact points on the bridge.  This does
+         * the calculation for one bridge panel given by its end points and
+         * their displacements.  We use a binary search that stops when
+         * a small tolerance is reached.
+         * 
+         * @param pt point of front contact
+         * @param p0 point at right (greatest x-coord) of panel
+         * @param d0 displacement of p0 due to load deflection
+         * @param p1 point at left (least x-coord) of panel
+         * @param d1 displacement of p1 due to load deflection
+         * @param dist distance from front contact to rear
+         * @return true if search for rear contact was successful
+         */
+        private boolean setLoadRotation(Affine.Point pt, 
+                Affine.Point p0, Affine.Vector d0, 
+                Affine.Point p1, Affine.Vector d1, double dist) {
+            double xP0 = (p0.x + d0.x);
+            double yP0 = (p0.y + d0.y);
+            if (hypot(pt.x - xP0, pt.y - yP0) < dist) {
+                return false;
+            }
+            double xP1 = (p1.x + d1.x);
+            double yP1 = (p1.y + d1.y);
+            double t0 = -.5; // Theoretically 0 would work, but this is numerically safer.
+            double t1 = 1.5; // Theoretically 1 would work, but this is numerically safer.
+            for (int i = 0; i < 20; i++) {
+                double t = (t0 + t1) / 2;
+                double x = (1 - t) * xP0 + t * xP1;
+                double y = (1 - t) * yP0 + t * yP1;
+                double eps = pt.distance(x, y) - dist;
+                if (eps > .01) {
+                    t0 = t;
+                }
+                else if (eps < -.01) {
+                    t1 = t;
+                }
+                else {
+                    loadRotation.x = pt.x - x;
+                    loadRotation.y = pt.y - y;
+                    double len = loadRotation.length();
+                    if (len > 1e-6) {
+                        loadRotation.x /= len;
+                        loadRotation.y /= len;
+                    }
+                    else {
+                        loadRotation.x = 1;
+                        loadRotation.y = 0;
+                    }
+                    return true;
+                }
+            }
+            return false;
+        }
+        
+        /**
+         * Initialize an interpolation for the special case where we are interpolating between zero load
+         * and dead load only.  Sets the load location for fade in effects.
+         * 
+         * @param deadLoadApplied the fraction of dead load to be applied in [0..1]
+         * @param xLoadParameter x-location of the load with respect to joint 0.
+         * @param displacementExaggeration amount that joint displacements should be exaggerated
+         */
+        public void initializeDeadLoadOnly(double deadLoadApplied, double xLoadParameter, double displacementExaggeration) {     
+            this.xLoadParameter = xLoadParameter;
+            Iterator<Joint> je = bridge.getJoints().iterator();
+            while (je.hasNext()) {
+                Joint joint = je.next();
+                int i = joint.getIndex();
+                displacement[i].x = deadLoadApplied * displacementExaggeration * getXJointDisplacement(0, i);
+                displacement[i].y = deadLoadApplied * displacementExaggeration * getYJointDisplacement(0, i);
+            }
+            nFailures = 0;
+            Iterator<Member> me = bridge.getMembers().iterator();
+            while (me.hasNext()) {
+                Member member = me.next();
+                int i = member.getIndex();
+                double force = deadLoadApplied * getMemberForce(0, i);
+                double ratio = (force > 0) ? force / getMemberTensileStrength(i) : force / getMemberCompressiveStrength(i);
+                forceRatio[i] = ratio * deadLoadApplied;
+                if (forceRatio[i] < -1.0 || forceRatio[i] > 1.0) {
+                    failureStatus[i] = FAILED;
+                    ++nFailures;
+                }
+                else {
+                    failureStatus[i] = NOT_FAILED;
+                }
+            }
+            ptLoad.x = xLoadParameter * DesignConditions.panelSizeWorld + bridge.getJoints().get(0).getPointWorld().x + displacement[0].x;
+            ptLoad.y = terrain.getRoadCenterlineElevation((float)ptLoad.x);
+            // Initialize rotation for fixed eye case where truck isn't hidden.
+            double x = ptLoad.x - DesignConditions.panelSizeWorld;
+            Affine.Point ptSearchLeft = new Affine.Point(x, terrain.getRoadCenterlineElevation((float)x));
+            loadRotation.setLocation(1, 0);
+            setLoadRotation(ptLoad, ptSearchLeft, zeroDisp, ptLoad, zeroDisp, DesignConditions.panelSizeWorld);
+        }
+
+        /**
+         * Initialize an interpolation for the current position of the load.  This will refer either to the
+         * displacement sets of the two adjacent joints or to the location of the approach roadway.
+         * 
+         * @param xLoadParameter location of load in panel lengths
+         * @param displacementExaggeration exaggeration factor for displacements
+         */
+        public void initialize(double xLoadParameter, double displacementExaggeration) {            
+            this.xLoadParameter = xLoadParameter;
+            final DesignConditions dc = bridge.getDesignConditions();
+            ptRightApproach.x = dc.getXRightmostDeckJoint() + 100.0;
+            int nLoadedJoints = dc.getNLoadedJoints();
+            loadRotation.setLocation(1, 0);
+
+            // Handle case where truck is not on bridge.
+            if (xLoadParameter <= 0 || xLoadParameter >= nLoadedJoints) {
+                Iterator<Joint> je = bridge.getJoints().iterator();
+                while (je.hasNext()) {
+                    Joint joint = je.next();
+                    int i = joint.getIndex();
+                    displacement[i].x = displacementExaggeration * getXJointDisplacement(0, i);
+                    displacement[i].y = displacementExaggeration * getYJointDisplacement(0, i);
+                }
+                nFailures = 0;
+                Iterator<Member> me = bridge.getMembers().iterator();
+                while (me.hasNext()) {
+                    Member member = me.next();
+                    int i = member.getIndex();
+                    double force = getMemberForce(0, i);
+                    forceRatio[i] = (force > 0) ? force / getMemberTensileStrength(i) : force / getMemberCompressiveStrength(i);
+                    if (forceRatio[i] < -1.0 || forceRatio[i] > 1.0) {
+                        failureStatus[i] = FAILED;
+                        ++nFailures;
+                    }
+                    else {
+                        failureStatus[i] = NOT_FAILED;
+                    }
+                }
+                // Truck position.
+                if (xLoadParameter <= 0) {
+                    ptLoad.x = xLoadParameter * DesignConditions.panelSizeWorld + 
+                            bridge.getJoints().get(0).getPointWorld().x + displacement[0].x;
+                }
+                else {
+                    final int iLast = nLoadedJoints - 1;
+                    ptLoad.x = (xLoadParameter - iLast) * DesignConditions.panelSizeWorld + 
+                            bridge.getJoints().get(iLast).getPointWorld().x + displacement[iLast].x;
+                }
+                ptLoad.y = terrain.getRoadCenterlineElevation((float)ptLoad.x);
+                double x = ptLoad.x - DesignConditions.panelSizeWorld;
+                Affine.Point ptSearchLeft = new Affine.Point(x, terrain.getRoadCenterlineElevation((float)x));
+                setLoadRotation(ptLoad, ptSearchLeft, zeroDisp, ptLoad, zeroDisp, DesignConditions.panelSizeWorld);
+                return;
+            }
+            
+            // General case.  Truck has at least one axle on the bridge. 
+            final int ilcLeft = (int)xLoadParameter;
+            final int ilcRight = (ilcLeft < nLoadedJoints - 1) ? ilcLeft + 1 : 0;
+            final double t1 = xLoadParameter - ilcLeft;
+            final double t0 = 1 - t1;
+            Iterator<Joint> je = bridge.getJoints().iterator();
+            while (je.hasNext()) {
+                int i = je.next().getIndex();
+                displacement[i].x = displacementExaggeration * (t0 * getXJointDisplacement(ilcLeft, i) + t1 * getXJointDisplacement(ilcRight, i));
+                displacement[i].y = displacementExaggeration * (t0 * getYJointDisplacement(ilcLeft, i) + t1 * getYJointDisplacement(ilcRight, i));
+            }
+            nFailures = 0;
+            Iterator<Member> me = bridge.getMembers().iterator();
+            while (me.hasNext()) {
+                Member member = me.next();
+                int i = member.getIndex();
+                final double force = t0 * memberForce[ilcLeft][i] + t1 * memberForce[ilcRight][i];
+                final double ratio = (force > 0) ? force / memberTensileStrength[i] : force / memberCompressiveStrength[i];
+                // We allow left force to trigger failures so we can't step past one.
+                if (memberFails[ilcLeft][i] || ratio < -1.0 || ratio > 1.0) {
+                    failureStatus[i] = FAILED;
+                    ++nFailures;
+                }
+                else {
+                    failureStatus[i] = NOT_FAILED;
+                }
+                forceRatio[i] = ratio;
+            }
+            final Affine.Point ptLeft = bridge.getJoints().get(ilcLeft).getPointWorld();
+            final Affine.Point ptRight = bridge.getJoints().get(ilcRight).getPointWorld();
+            if (ilcLeft < nLoadedJoints - 1) {
+                // Interpolate between left and right points.
+                ptLoad.x = t0 * (ptLeft.x + displacement[ilcLeft].x) + t1 * (ptRight.x + displacement[ilcRight].x);
+                ptLoad.y = t0 * (ptLeft.y + displacement[ilcLeft].y) + t1 * (ptRight.y + displacement[ilcRight].y) + BridgeView.wearSurfaceHeight;
+            }
+            else {
+                // Interpolate between height of roadway and left point.
+                ptLoad.x = (ptLeft.x + displacement[ilcLeft].x) + t1 * DesignConditions.panelSizeWorld;
+                ptLoad.y = t0 * (ptLeft.y + displacement[ilcLeft].y + BridgeView.wearSurfaceHeight) + t1 * terrain.getRoadCenterlineElevation((float)ptLoad.x);
+            }
+
+            Affine.Point ptSearchRight;
+            Affine.Vector dispSearchRight;
+            // If truck is still on bridge, start search for rear axle height at point right of front wheel.
+            // Else start it at the front tire contact point with the approach road.
+            if (ilcLeft < nLoadedJoints - 1) {
+                ptSearchRight = ptRight;
+                dispSearchRight = displacement[ilcRight];
+            }
+            else {
+                ptSearchRight = ptLoad;
+                dispSearchRight = zeroDisp;                
+            }
+            // Search left for a (displaced) panel that includes the rear axle.  When found (should always
+            // be successful, set the load rotation.
+            for (int i = ilcLeft; i >= -1; i--) {
+                Affine.Point ptSearchLeft;
+                Affine.Vector dispSearchLeft;
+                if (i < 0) {
+                    double x = ptLoad.x - DesignConditions.panelSizeWorld;
+                    ptSearchLeft = new Affine.Point(x, terrain.getRoadCenterlineElevation((float)x));
+                    dispSearchLeft = zeroDisp;
+                }
+                else {
+                    ptSearchLeft = bridge.getJoints().get(i).getPointWorld().plus(0, BridgeView.wearSurfaceHeight);
+                    dispSearchLeft = displacement[i];
+                }
+                if (setLoadRotation(ptLoad, ptSearchLeft, dispSearchLeft, ptSearchRight, dispSearchRight, DesignConditions.panelSizeWorld)) {
+                    break;
+                }
+                ptSearchRight = ptSearchLeft;
+                dispSearchRight = dispSearchLeft;
+            }
+        }
+  
+        /**
+         * Initialize this interpolation by interpolating two others.  A base interpolation is used for result
+         * load location, forces, failures, and a weighted fraction of displacements.  A target interpolation
+         * gives the other weighted component of the displacements only.  A displacement parameter determines linear
+         * interpolation of base and target displacements with 0 => base, 1 => target.
+         * 
+         * @param base base interpolation 
+         * @param target target interpolation
+         * @param displacementParameter parameter 
+         */
+        public void initialize(Interpolation base, Interpolation target, double displacementParameter) {
+            xLoadParameter = base.xLoadParameter;
+            final DesignConditions dc = bridge.getDesignConditions();
+            ptRightApproach.x = dc.getXRightmostDeckJoint() + 100.0;
+            int nLoadedJoints = dc.getNLoadedJoints();
+            loadRotation.setLocation(1, 0);
+            final double ta = 1.0 - displacementParameter;
+            final double tf = displacementParameter;
+            final int nJoints = bridge.getJoints().size();
+            for (int i = 0; i < nJoints; i++) {
+                displacement[i].x = ta * base.displacement[i].x + tf * target.displacement[i].x;
+                displacement[i].y = ta * base.displacement[i].y + tf * target.displacement[i].y;
+            }
+            final int nMembers = bridge.getMembers().size();
+            for (int i = 0; i < nMembers; i++) {
+                forceRatio[i] = base.forceRatio[i];
+                if (base.failureStatus[i] == NOT_FAILED) {
+                    failureStatus[i] = NOT_FAILED;
+                }
+                else {
+                    // All this is just to calculate the lengths of members
+                    // with displacements and not generate any garbage.
+                    final Member m = bridge.getMembers().get(i);
+                    final Joint a = m.getJointA();
+                    final Joint b = m.getJointB();
+                    final Affine.Point pa = a.getPointWorld();
+                    final Affine.Point pb = b.getPointWorld();
+                    final Affine.Vector da = base.displacement[a.getIndex()];
+                    final Affine.Vector db = base.displacement[b.getIndex()];
+                    final double dx = (pa.x + da.x) - (pb.x + db.x);
+                    final double dy = (pa.y + da.y) - (pb.y + db.y);
+                    failureStatus[i] = Math.sqrt(dx * dx + dy * dy);
+                }
+            }
+            nFailures = base.nFailures;
+
+            // Handle case where truck is not on bridge.
+            if (xLoadParameter <= 0 || xLoadParameter >= nLoadedJoints) {
+                // Truck position.
+                if (xLoadParameter <= 0) {
+                    ptLoad.x = xLoadParameter * DesignConditions.panelSizeWorld + 
+                            bridge.getJoints().get(0).getPointWorld().x + displacement[0].x;
+                }
+                else {
+                    final int iLast = nLoadedJoints - 1;
+                    ptLoad.x = (xLoadParameter - iLast) * DesignConditions.panelSizeWorld + 
+                            bridge.getJoints().get(iLast).getPointWorld().x + displacement[iLast].x;
+                }
+                ptLoad.y = terrain.getRoadCenterlineElevation((float)ptLoad.x);
+                double x = ptLoad.x - DesignConditions.panelSizeWorld;
+                Affine.Point ptSearchLeft = new Affine.Point(x, terrain.getRoadCenterlineElevation((float)x));
+                setLoadRotation(ptLoad, ptSearchLeft, zeroDisp, ptLoad, zeroDisp, DesignConditions.panelSizeWorld);
+                return;
+            }
+            
+            // General case.  Truck has at least one axle on the bridge. 
+            final int ilcLeft = (int)xLoadParameter;
+            final int ilcRight = (ilcLeft < nLoadedJoints - 1) ? ilcLeft + 1 : 0;
+            final double t1 = xLoadParameter - ilcLeft;
+            final double t0 = 1 - t1;
+            final Affine.Point ptLeft = bridge.getJoints().get(ilcLeft).getPointWorld();
+            final Affine.Point ptRight = bridge.getJoints().get(ilcRight).getPointWorld();
+            if (ilcLeft < nLoadedJoints - 1) {
+                // Interpolate between left and right points.
+                ptLoad.x = t0 * (ptLeft.x + displacement[ilcLeft].x) + t1 * (ptRight.x + displacement[ilcRight].x);
+                ptLoad.y = t0 * (ptLeft.y + displacement[ilcLeft].y) + t1 * (ptRight.y + displacement[ilcRight].y) + BridgeView.wearSurfaceHeight;
+            }
+            else {
+                // Interpolate between height of roadway and left point.
+                ptLoad.x = (ptLeft.x + displacement[ilcLeft].x) + t1 * DesignConditions.panelSizeWorld;
+                ptLoad.y = t0 * (ptLeft.y + displacement[ilcLeft].y + BridgeView.wearSurfaceHeight) + t1 * terrain.getRoadCenterlineElevation((float)ptLoad.x);
+            }
+
+            Affine.Point ptSearchRight;
+            Affine.Vector dispSearchRight;
+            // If truck is still on bridge, start search for rear axle height at point right of front wheel.
+            // Else start it at the front tire contact point with the approach road.
+            if (ilcLeft < nLoadedJoints - 1) {
+                ptSearchRight = ptRight.plus(0, BridgeView.wearSurfaceHeight);
+                dispSearchRight = displacement[ilcRight];
+            }
+            else {
+                ptSearchRight = ptLoad;
+                dispSearchRight = zeroDisp;                
+            }
+            // Search left for a (displaced) panel that includes the rear axle.  When found (should always
+            // be successful, set the load rotation.
+            for (int i = ilcLeft; i >= -1; i--) {
+                Affine.Point ptSearchLeft;
+                Affine.Vector dispSearchLeft;
+                if (i < 0) {
+                    double x = ptLoad.x - DesignConditions.panelSizeWorld;
+                    ptSearchLeft = new Affine.Point(x, terrain.getRoadCenterlineElevation((float)x));
+                    dispSearchLeft = zeroDisp;
+                }
+                else {
+                    ptSearchLeft = bridge.getJoints().get(i).getPointWorld().plus(0, BridgeView.wearSurfaceHeight);
+                    dispSearchLeft = displacement[i];
+                }
+                if (setLoadRotation(ptLoad, ptSearchLeft, dispSearchLeft, ptSearchRight, dispSearchRight, DesignConditions.panelSizeWorld)) {
+                    break;
+                }
+                ptSearchRight = ptSearchLeft;
+                dispSearchRight = dispSearchLeft;
+            }
+        }         
+    };
+
+    /**
+     * Return a new interpolation.
+     * 
+     * @param terrain terrain used for roadway dimensions of the interpolation.
+     * 
+     * @return the new interpolation
+     */
+    public Interpolation getNewInterpolation(TerrainModel terrain) {
+        return new Interpolation(terrain);
+    }
